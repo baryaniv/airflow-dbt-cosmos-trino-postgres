@@ -19,30 +19,30 @@ Airflow → dbt (via Cosmos) → Trino → Postgres
 
 ```
 .
-├── docker-compose.yml      # All services in one compose file
-├── airflow/                # All Airflow-related files
-│   ├── dags/              # Airflow DAGs
-│   │   ├── __init__.py
-│   │   └── simple_dbt_dag.py
-│   ├── dbt_projects/       # dbt projects directory
+├── docker-compose.yml          # All services in one compose file
+├── Dockerfile                  # Custom Airflow image with dbt in venv
+├── requirements.txt            # Python dependencies
+├── airflow/                    # All Airflow-related files
+│   ├── dags/                  # Airflow DAGs
+│   │   ├── simple_dbt_dag.py  # Main DAG using dbt_utils
+│   │   └── utils/             # Utility modules
+│   │       └── dbt_utils.py   # Cosmos integration utilities
+│   ├── dbt_projects/          # dbt projects directory
 │   │   └── dbt_project_example/  # Example dbt project
 │   │       ├── dbt_project.yml
-│   │       ├── profiles.yml
+│   │       ├── profiles.yml   # dbt profile configuration
 │   │       ├── models/
 │   │       │   ├── customers.sql
+│   │       │   ├── first_customer.sql
 │   │       │   └── schema.yml
 │   │       ├── analyses/      # dbt analyses (with .gitkeep)
 │   │       ├── tests/         # dbt tests (with .gitkeep)
 │   │       ├── seeds/         # dbt seeds (with .gitkeep)
 │   │       ├── macros/        # dbt macros (with .gitkeep)
 │   │       └── snapshots/     # dbt snapshots (with .gitkeep)
-│   ├── scripts/           # Utility scripts
-│   │   └── setup_connections.py
-│   ├── dbt_utils.py       # Cosmos integration utilities
-│   ├── requirements.txt  # Python dependencies
-│   ├── logs/              # Airflow logs
-│   └── plugins/           # Airflow plugins
-├── trino/                  # Trino catalog configuration
+│   ├── logs/                  # Airflow logs
+│   └── plugins/               # Airflow plugins
+├── trino/                      # Trino catalog configuration
 │   └── catalog/
 │       └── postgres.properties
 └── README.md
@@ -57,33 +57,26 @@ Airflow → dbt (via Cosmos) → Trino → Postgres
 
 ### Setup
 
-1. **Set environment variables** (optional):
-   ```bash
-   # Create .env file with optional overrides
-   echo "AIRFLOW_UID=$(id -u 2>/dev/null || echo 50000)" > .env
-   echo "TRINO_USER=admin" >> .env
-   echo "TRINO_PASSWORD=admin123" >> .env
-   ```
-   Default values: `TRINO_USER=admin`, `TRINO_PASSWORD=admin123`
-
-
-3. **Start all services**:
+1. **Start all services**:
    ```bash
    docker-compose up -d
    ```
 
-4. **Wait for services to initialize** (especially the first time):
+2. **Wait for services to initialize** (especially the first time):
    ```bash
    docker-compose logs -f airflow-init
    ```
-   Wait until you see "Trino connection created successfully!" or similar.
+   Wait until you see the initialization complete.
 
-5. **Access the services**:
+3. **Access the services**:
    - **Airflow UI**: http://localhost:18081
      - Username: `admin`
      - Password: `admin`
    - **Trino UI**: http://localhost:18080
    - **Postgres**: localhost:15432
+     - Username: `postgres`
+     - Password: `postgres`
+     - Database: `postgres`
 
 ### Running the DAG
 
@@ -94,7 +87,7 @@ Airflow → dbt (via Cosmos) → Trino → Postgres
 
 ### Verifying Results
 
-After the DAG runs successfully, you can query the created table through Trino:
+After the DAG runs successfully, you can query the created tables through Trino:
 
 **Using Trino CLI:**
 ```bash
@@ -103,32 +96,45 @@ trino --server http://localhost:18080 --user admin
 
 Then run:
 ```sql
-SELECT * FROM postgres.postgres.customers;
+SELECT * FROM postgres.public.customers;
+SELECT * FROM postgres.public.first_customer;
 ```
 
 **Using Trino Web UI:**
 1. Go to http://localhost:18080
-2. Execute: `SELECT * FROM postgres.postgres.customers;`
+2. Execute: `SELECT * FROM postgres.public.customers;`
 
-**Note:** The table is created in Trino's `postgres.postgres` schema (catalog.schema), not directly in Postgres. Trino acts as the query layer.
+**Note:** The tables are created in Trino's `postgres.public` schema (catalog.schema), not directly in Postgres. Trino acts as the query layer.
 
 ## Key Files
 
-### `airflow/dbt_utils.py`
+### `airflow/dags/utils/dbt_utils.py`
 
 Contains utility functions for creating dbt TaskGroups with Cosmos:
-- `get_trino_profile_config()` - Configures Trino connection for dbt
-- `create_dbt_task_group()` - Creates a Cosmos DbtTaskGroup
+- `TrinoUserProfileMapping` - Custom profile mapping class that maps Airflow HTTP connections to dbt Trino profiles
+- `run_dbt_project()` - Main function to create a dbt TaskGroup for a given project path
+
+The profile mapping:
+- Reads from Airflow HTTP connection (`trino_test`)
+- Extracts `database` from connection's `extra` field
+- Maps connection parameters to dbt profile dynamically
 
 ### `airflow/dags/simple_dbt_dag.py`
 
-Example Airflow DAG that:
-1. Verifies Trino connection
-2. Runs dbt models using Cosmos
+Simple Airflow DAG that:
+- Uses `run_dbt_project()` from `dbt_utils`
+- Runs all dbt models in the `dbt_project_example` project
+- Connects to Trino via the mapped profile
 
-### `airflow/dbt_projects/dbt_project_example/models/customers.sql`
+### `airflow/dbt_projects/dbt_project_example/`
 
-Simple dbt model that creates a customers table with sample data.
+dbt project containing:
+- `profiles.yml` - dbt profile configuration (uses `method: none` for no authentication)
+- `models/customers.sql` - Creates a customers table with sample data
+- `models/first_customer.sql` - Creates a table with the first customer's name
+- `models/schema.yml` - Model documentation and tests
+
+**Note:** Models are materialized as `tables` (not views) because Trino's PostgreSQL connector doesn't support creating views.
 
 ## Services
 
@@ -137,11 +143,26 @@ Simple dbt model that creates a customers table with sample data.
   - Password: `postgres`
   - Database: `postgres`
 - **Trino** (port 18080): Query engine connecting to Postgres
-  - Username: `admin` (or any username)
-  - Password: (empty, no password required)
+  - No authentication required (local development)
   - Web UI: http://localhost:18080
+  - Connects to Postgres via catalog configuration
 - **Airflow Webserver** (port 18081): Airflow UI
+  - Username: `admin`
+  - Password: `admin`
 - **Airflow Scheduler**: Runs DAGs
+- **Airflow Init**: Initializes database and creates connections
+
+## Connections
+
+The project creates an Airflow HTTP connection named `trino_test`:
+- **Type**: `http`
+- **Host**: `trino` (service name)
+- **Port**: `8080` (internal port)
+- **Login**: `admin`
+- **Schema**: `public`
+- **Extra**: `{"database": "postgres"}`
+
+This connection is automatically created during `airflow-init` and is used by the `TrinoUserProfileMapping` to generate dbt profiles dynamically.
 
 ## Connecting to Trino
 
@@ -154,7 +175,7 @@ trino --server http://localhost:18080 --user admin
 
 **Using JDBC URL:**
 ```
-jdbc:trino://localhost:18080/postgres/postgres
+jdbc:trino://localhost:18080/postgres/public
 ```
 
 **Using Python (trino library):**
@@ -166,18 +187,18 @@ conn = connect(
     port=18080,
     user='admin',
     catalog='postgres',
-    schema='postgres'
+    schema='public'
 )
 ```
 
 **Using dbt:**
-The connection is already configured in `airflow/dbt_projects/dbt_project_example/profiles.yml`
+The connection is configured in `airflow/dbt_projects/dbt_project_example/profiles.yml`
 
 ### From inside Docker containers:
 - Host: `trino` (service name)
 - Port: `8080` (internal port)
 - User: `admin`
-- Password: (empty)
+- Password: (empty, no authentication)
 
 ## Customization
 
@@ -189,25 +210,62 @@ The connection is already configured in `airflow/dbt_projects/dbt_project_exampl
 
 ### Modifying Connections
 
-Trino connection is automatically created during initialization. To modify:
-- Edit the `airflow connections add` command in `docker-compose.yml`
-- Or use the Airflow UI: Admin → Connections
+The Trino HTTP connection is automatically created during initialization in `docker-compose.yml`. To modify:
+- Edit the `airflow connections add` command in `docker-compose.yml` (airflow-init service)
+- Or use the Airflow UI: Admin → Connections → Edit `trino_test`
+
+### Changing Trino Database
+
+Update the `database` value in the connection's `extra` field:
+- In `docker-compose.yml`: Change `--conn-extra '{"database": "postgres"}'`
+- Or in Airflow UI: Edit connection → Extra → `{"database": "your_database"}`
+
+## Technical Details
+
+### dbt Profile Mapping
+
+The `TrinoUserProfileMapping` class:
+- Maps Airflow HTTP connections to dbt Trino profiles
+- Reads `database` from connection's `extra` field
+- Supports both `profile` (runtime) and `mock_profile` (DAG parsing) methods
+- Automatically handles required fields like `database`, `host`, `user`, `schema`
+
+### Docker Setup
+
+- **Custom Dockerfile**: Extends `apache/airflow:2.10.0` and installs:
+  - `astronomer-cosmos[trino]` in main environment
+  - dbt packages in virtual environment (`/opt/airflow/dbt_venv`)
+- **dbt executable**: Located at `/opt/airflow/dbt_venv/bin/dbt`
+- **Ports**: Random ports (18080, 18081, 15432) to avoid conflicts
 
 ## Troubleshooting
 
 ### Services won't start
 - Check if ports 15432, 18080, 18081 are available
 - Ensure Docker has enough resources allocated
+- Check logs: `docker-compose logs <service-name>`
 
 ### DAG not appearing
 - Check `docker-compose logs airflow-scheduler` for errors
 - Verify DAG file is in `airflow/dags/` directory
-- Check for Python syntax errors
+- Check for Python syntax errors or import issues
 
 ### Trino connection issues
 - Verify Trino is running: `docker-compose ps trino`
 - Check Trino logs: `docker-compose logs trino`
 - Verify Postgres is accessible from Trino
+- Check Airflow connection: Admin → Connections → `trino_test`
+
+### dbt errors
+- Verify dbt is installed: Check `/opt/airflow/dbt_venv/bin/dbt` exists
+- Check dbt project structure: Ensure `dbt_project.yml` and `profiles.yml` are correct
+- Check logs for profile generation errors
+- Verify `database` field is present in generated profiles.yml
+
+### "database is a required property" error
+- Ensure `database` is in the connection's `extra` field
+- Check that `TrinoUserProfileMapping` includes `database` in the profile
+- Verify the profile mapping is correctly reading from the connection
 
 ## Clean Up
 
