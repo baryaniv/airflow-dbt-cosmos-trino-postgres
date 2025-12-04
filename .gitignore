@@ -1,0 +1,10 @@
+airflow/logs/
+airflow/plugins/
+airflow/dbt_projects/*/target/
+airflow/dbt_projects/*/dbt_packages/
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+

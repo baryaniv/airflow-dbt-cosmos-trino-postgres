@@ -1,0 +1,13 @@
+trino_profile:
+  target: dev
+  outputs:
+    dev:
+      type: trino
+      method: userpass
+      user: admin
+      password: ""
+      host: trino
+      port: 8080
+      database: postgres
+      schema: public
+      threads: 1
